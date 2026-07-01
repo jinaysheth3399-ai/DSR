@@ -1,0 +1,274 @@
+openapi: 3.1.0
+info:
+  title: DSR Visits API
+  version: "1.0.0"
+  description: >
+    Read-only API returning the complete data for field-sales daily visit
+    reports (DSR submissions). Intended for server-to-server consumption.
+    See docs/visits-api.md for the full guide.
+servers:
+  - url: https://<your-deployment-host>/api/v1
+    description: Deployment host (replace the placeholder)
+security:
+  - bearerAuth: []
+  - apiKeyHeader: []
+paths:
+  /visits:
+    get:
+      operationId: listVisits
+      summary: List visits
+      description: Returns a filtered, paginated list of visits, newest first by default.
+      parameters:
+        - name: date_from
+          in: query
+          required: false
+          schema: { type: string, format: date }
+          description: Include visits with visit_date on or after this date (YYYY-MM-DD).
+        - name: date_to
+          in: query
+          required: false
+          schema: { type: string, format: date }
+          description: Include visits with visit_date on or before this date (YYYY-MM-DD).
+        - name: outcome
+          in: query
+          required: false
+          schema: { type: string, enum: [Positive, Neutral, Negative] }
+          description: Filter by visit outcome.
+        - name: agency
+          in: query
+          required: false
+          schema: { type: string, minLength: 1, maxLength: 100 }
+          description: Case-insensitive substring match against agency_code or agency_name.
+        - name: submitted_by
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: Filter to a single field-sales employee by their submitter.id.
+        - name: has_lead
+          in: query
+          required: false
+          schema: { type: string, enum: ["true", "false"] }
+          description: Filter on the DMC lead-interest flag.
+        - name: updated_since
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+          description: Include visits with updated_at on or after this timestamp. Use for incremental sync.
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [visit_date, created_at, updated_at]
+            default: visit_date
+        - name: order
+          in: query
+          required: false
+          schema: { type: string, enum: [asc, desc], default: desc }
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: page_size
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+      responses:
+        "200":
+          description: A page of visits.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Visit" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400":
+          description: Invalid query parameters.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid API key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Unexpected server or database error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: API key not configured on the server.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /visits/{id}:
+    get:
+      operationId: getVisit
+      summary: Get a single visit
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The visit.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/Visit" }
+        "400":
+          description: The id is not a valid UUID.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid API key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: No visit exists with that id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Unexpected server or database error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "Send the API key as: Authorization: Bearer <key>"
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: Alternative to the bearer header.
+  schemas:
+    EscalationRef:
+      type: object
+      required: [has_ref, booking_id]
+      properties:
+        has_ref: { type: boolean }
+        booking_id:
+          type: [string, "null"]
+          description: Non-null only when has_ref is true.
+    Submitter:
+      type: object
+      required: [id, name, employee_code]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        employee_code: { type: string }
+    Visit:
+      type: object
+      required:
+        [id, visit_date, submitter, header, flight, hotel, dmc, close, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        visit_date: { type: string, format: date, description: "YYYY-MM-DD, in IST." }
+        submitter: { $ref: "#/components/schemas/Submitter" }
+        header:
+          type: object
+          required: [agent_type, agency_code, agency_name]
+          properties:
+            agent_type: { type: string, enum: [registered, new] }
+            agency_code:
+              type: [string, "null"]
+              description: Set when agent_type is registered.
+            agency_name:
+              type: [string, "null"]
+              description: Set when agent_type is new.
+        flight:
+          type: object
+          required:
+            [escalation, monthly_txn_lakhs, domestic_portals, international_portals, issue_complaint, agent_mode, dealing_type, client_type, payment_mode, credit_type]
+          properties:
+            escalation: { $ref: "#/components/schemas/EscalationRef" }
+            monthly_txn_lakhs: { type: number, description: Monthly flight transaction value in lakhs. }
+            domestic_portals: { type: array, items: { type: string } }
+            international_portals: { type: array, items: { type: string } }
+            issue_complaint: { type: array, items: { type: string } }
+            agent_mode: { type: string, enum: [Offline, Online, Both] }
+            dealing_type: { type: string, enum: [Direct, Distributor] }
+            client_type: { type: string, enum: [Corporate, "Direct customer"] }
+            payment_mode: { type: string, enum: [Cash, Credit, "Bank transfer"] }
+            credit_type:
+              type: [string, "null"]
+              enum: ["3 days", Weekly, BSP, null]
+              description: Non-null only when payment_mode is Credit.
+        hotel:
+          type: object
+          required:
+            [escalation, monthly_room_nights_other, current_room_nights_etrav, primary_platform, committed_room_nights, category_preference, issue_complaint]
+          properties:
+            escalation: { $ref: "#/components/schemas/EscalationRef" }
+            monthly_room_nights_other: { type: number }
+            current_room_nights_etrav: { type: number }
+            primary_platform: { type: array, items: { type: string } }
+            committed_room_nights: { type: number }
+            category_preference:
+              type: array
+              items: { type: string, enum: ["3*", "4*", "5*"] }
+            issue_complaint: { type: [string, "null"] }
+        dmc:
+          type: object
+          required:
+            [escalation, destination_discussed, agent_active, current_vendor, current_vendor_pax, lead_interest, committed_pax, objection]
+          properties:
+            escalation: { $ref: "#/components/schemas/EscalationRef" }
+            destination_discussed: { type: array, items: { type: string } }
+            agent_active: { type: boolean }
+            current_vendor: { type: string }
+            current_vendor_pax: { type: number }
+            lead_interest: { type: boolean }
+            committed_pax: { type: number }
+            objection: { type: array, items: { type: string } }
+        close:
+          type: object
+          required: [visit_outcome, visit_commitment]
+          properties:
+            visit_outcome: { type: string, enum: [Positive, Neutral, Negative] }
+            visit_commitment: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Pagination:
+      type: object
+      required: [page, page_size, total, total_pages, has_next, has_prev]
+      properties:
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+        total_pages: { type: integer }
+        has_next: { type: boolean }
+        has_prev: { type: boolean }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              description: Present for validation errors.
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  message: { type: string }
