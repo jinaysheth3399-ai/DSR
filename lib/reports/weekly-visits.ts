@@ -97,5 +97,13 @@ export async function listReportRows(
     }
   })
 
+  // Group by date, then by employee within each date, so one person's visits
+  // for a day are contiguous rather than interleaved with other employees'.
+  result.sort((a, b) => {
+    if (a.visit_date !== b.visit_date) return a.visit_date < b.visit_date ? -1 : 1
+    if (a.employee_name !== b.employee_name) return a.employee_name.localeCompare(b.employee_name)
+    return a.employee_code.localeCompare(b.employee_code)
+  })
+
   return { ok: true, rows: result }
 }
