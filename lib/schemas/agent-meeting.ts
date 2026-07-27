@@ -2,8 +2,13 @@ import { z } from "zod"
 
 // ---------------------------------------------------------------------------
 // Agent meeting report — standalone form, currently restricted to a single
-// employee (Karan Makdani, employee_code EC052; see app/_actions/agent-meeting.ts).
+// employee (Karan Makdani; see app/_actions/agent-meeting.ts).
 // ---------------------------------------------------------------------------
+
+// Restricted to a single employee until/unless this becomes a general-purpose
+// form. Lives here (not in the "use server" action file) because that file
+// may only export async functions in this Next.js version.
+export const AGENT_MEETING_EMPLOYEE_CODE = "EC052"
 
 export const DESTINATION_OPTIONS = [
   "Dubai",

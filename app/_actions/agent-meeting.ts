@@ -5,14 +5,11 @@ import { redirect } from "next/navigation"
 import { requireUser } from "@/lib/auth/dal"
 import { getSupabaseAdmin } from "@/lib/supabase/admin"
 import {
+  AGENT_MEETING_EMPLOYEE_CODE,
   agentMeetingFormSchema,
   type AgentMeetingFormValues,
 } from "@/lib/schemas/agent-meeting"
 import { logger } from "@/lib/logger"
-
-// Restricted to a single employee (Karan Makdani) until/unless this becomes
-// a general-purpose form.
-export const AGENT_MEETING_EMPLOYEE_CODE = "EC052"
 
 function todayInIst(): string {
   // Returns YYYY-MM-DD in Asia/Kolkata regardless of server timezone.
