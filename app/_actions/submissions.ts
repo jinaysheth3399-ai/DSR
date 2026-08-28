@@ -74,7 +74,7 @@ function applyFilters(q: any, filters: SubmissionFilters): any {
 }
 
 // agent_meeting_reports has no outcome/lead concept, so a row can never match
-// those filters — callers should skip fetching this table entirely when
+// those filters, so callers should skip fetching this table entirely when
 // either is set, rather than translating them here.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function applyMeetingFilters(q: any, filters: SubmissionFilters): any {
@@ -152,7 +152,7 @@ async function fetchTopMeetingRows(
   filters: SubmissionFilters,
   limit: number
 ): Promise<SubmissionListRow[]> {
-  // A row here can never satisfy an outcome/lead filter — skip the fetch.
+  // A row here can never satisfy an outcome/lead filter, so skip the fetch.
   if (filters.outcome || filters.has_lead) return []
 
   const sb = getSupabaseAdmin()

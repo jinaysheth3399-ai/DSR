@@ -218,7 +218,7 @@ curl -s \
 }
 ```
 
-`outcome` and `has_lead` only ever match `dsr_visit` rows — an `agent_meeting`
+`outcome` and `has_lead` only ever match `dsr_visit` rows. An `agent_meeting`
 row has no notion of either, so it's simply excluded from the results
 whenever one of those filters is set.
 
@@ -252,14 +252,14 @@ If no visit has that id, the response is `404` with error code `not_found`.
 
 There are two kinds of visit, distinguished by `type`:
 
-- **`dsr_visit`** — a standard field-sales report. `header`, `flight`,
+- **`dsr_visit`**: a standard field-sales report. `header`, `flight`,
   `hotel`, `dmc`, and `close` are all populated; `agent_meeting` is `null`.
-- **`agent_meeting`** — a standalone agent-meeting report (currently
+- **`agent_meeting`**: a standalone agent-meeting report (currently
   submitted by one employee, Karan Makdani; see `docs` in the repo for
   `app/_actions/agent-meeting.ts`). `header`/`flight`/`hotel`/`dmc`/`close`
   are all `null`; `agent_meeting` is populated instead.
 
-Always check `type` before reading either set of fields — exactly one side
+Always check `type` before reading either set of fields. Exactly one side
 is populated, never both, and which one depends on `type`.
 
 ### Top level
@@ -275,7 +275,7 @@ is populated, never both, and which one depends on `type`.
 | `hotel`         | object / null | Hotel business section. `dsr_visit` only. |
 | `dmc`           | object / null | DMC (destination management) business section. `dsr_visit` only. |
 | `close`         | object / null | Visit outcome and commitment. `dsr_visit` only. |
-| `agent_meeting` | object / null | Meeting details. `agent_meeting` only — see below. |
+| `agent_meeting` | object / null | Meeting details. `agent_meeting` only, see below. |
 | `created_at`    | string (ISO 8601) | When the row was created (UTC). |
 | `updated_at`    | string (ISO 8601) | When the row was last modified (UTC). |
 

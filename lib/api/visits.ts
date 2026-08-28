@@ -325,7 +325,7 @@ function applyDsrFilters(q: any, query: VisitsQuery): any {
   return out
 }
 
-// agent_meeting_reports has no outcome/lead concept — a row can never match
+// agent_meeting_reports has no outcome/lead concept, so a row can never match
 // those filters, so callers skip fetching this table when either is set.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function applyMeetingFilters(q: any, query: VisitsQuery): any {
@@ -484,7 +484,7 @@ export async function getVisitById(id: string): Promise<GetVisitResult> {
     }
   }
 
-  // Not a dsr_submissions row — the same id could belong to a standalone
+  // Not a dsr_submissions row. The same id could belong to a standalone
   // agent meeting report (uuid namespaces are independent per table).
   const { data: meetingRow, error: meetingError } = await sb
     .from("agent_meeting_reports")

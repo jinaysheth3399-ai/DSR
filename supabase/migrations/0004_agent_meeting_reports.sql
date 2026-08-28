@@ -1,4 +1,4 @@
--- 0004_agent_meeting_reports.sql — standalone meeting-report form, currently
+-- 0004_agent_meeting_reports.sql: standalone meeting-report form, currently
 -- restricted (in application code) to a single employee: Karan Makdani
 -- (employee_code EC052). Separate from dsr_submissions by design.
 

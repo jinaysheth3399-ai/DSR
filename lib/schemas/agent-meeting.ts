@@ -1,7 +1,7 @@
 import { z } from "zod"
 
 // ---------------------------------------------------------------------------
-// Agent meeting report — standalone form, currently restricted to a single
+// Agent meeting report: standalone form, currently restricted to a single
 // employee (Karan Makdani; see app/_actions/agent-meeting.ts).
 // ---------------------------------------------------------------------------
 
