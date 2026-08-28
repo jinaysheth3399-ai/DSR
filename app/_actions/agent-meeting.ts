@@ -1,8 +1,9 @@
 "use server"
 
 import { redirect } from "next/navigation"
+import { z } from "zod"
 
-import { requireUser } from "@/lib/auth/dal"
+import { requireAdmin, requireUser } from "@/lib/auth/dal"
 import { getSupabaseAdmin } from "@/lib/supabase/admin"
 import {
   AGENT_MEETING_EMPLOYEE_CODE,
@@ -79,4 +80,59 @@ export async function submitAgentMeeting(
 
   // Server-side navigation — throws NEXT_REDIRECT, never returns.
   redirect("/dsr/karan/success")
+}
+
+// ---------------------------------------------------------------------------
+// Admin read: a single meeting report by id (for app/(authed)/admin/submissions/meeting/[id])
+// ---------------------------------------------------------------------------
+
+export type AgentMeetingDetail = {
+  id: string
+  visit_date: string
+  travel_agent_name: string
+  agent_code: string
+  city: string
+  business_aspect: string
+  current_challenges: string
+  meeting_summary: string
+  potential_queries: string
+  destinations_interested: string[]
+  created_at: string
+  submitter_name: string
+  submitter_code: string
+}
+
+export async function getAgentMeetingReport(id: string): Promise<AgentMeetingDetail | null> {
+  await requireAdmin()
+  if (!z.string().uuid().safeParse(id).success) return null
+
+  const sb = getSupabaseAdmin()
+  const { data: row } = await sb
+    .from("agent_meeting_reports")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle()
+  if (!row) return null
+
+  const { data: emp } = await sb
+    .from("employees")
+    .select("full_name, employee_code")
+    .eq("id", row.submitted_by as string)
+    .maybeSingle()
+
+  return {
+    id: row.id as string,
+    visit_date: row.visit_date as string,
+    travel_agent_name: row.travel_agent_name as string,
+    agent_code: row.agent_code as string,
+    city: row.city as string,
+    business_aspect: row.business_aspect as string,
+    current_challenges: row.current_challenges as string,
+    meeting_summary: row.meeting_summary as string,
+    potential_queries: row.potential_queries as string,
+    destinations_interested: (row.destinations_interested as string[] | null) ?? [],
+    created_at: row.created_at as string,
+    submitter_name: emp?.full_name ?? "(deleted)",
+    submitter_code: emp?.employee_code ?? "—",
+  }
 }

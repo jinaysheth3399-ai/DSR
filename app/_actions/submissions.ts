@@ -31,12 +31,16 @@ export type SubmissionFilters = z.infer<typeof filterSchema>
 
 export type SubmissionListRow = {
   id: string
+  // "dsr" = a dsr_submissions row; "agent_meeting" = an agent_meeting_reports
+  // row (see app/_actions/agent-meeting.ts). The two tables have unrelated
+  // shapes, so list rows carry only the fields both can show; view the
+  // record's own detail page for the rest.
+  source: "dsr" | "agent_meeting"
   visit_date: string
-  agent_type: "registered" | "new"
-  agency_code: string | null
-  agency_name: string | null
-  visit_outcome: "Positive" | "Neutral" | "Negative"
-  dmc_lead_interest: boolean
+  agent_label: string
+  agent_sublabel: string
+  visit_outcome: "Positive" | "Neutral" | "Negative" | null
+  dmc_lead_interest: boolean | null
   created_at: string
   submitter_name: string
   submitter_code: string
@@ -69,6 +73,152 @@ function applyFilters(q: any, filters: SubmissionFilters): any {
   return out
 }
 
+// agent_meeting_reports has no outcome/lead concept, so a row can never match
+// those filters — callers should skip fetching this table entirely when
+// either is set, rather than translating them here.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyMeetingFilters(q: any, filters: SubmissionFilters): any {
+  let out = q
+  if (filters.date_from) out = out.gte("visit_date", filters.date_from)
+  if (filters.date_to) out = out.lte("visit_date", filters.date_to)
+  if (filters.submitted_by) out = out.eq("submitted_by", filters.submitted_by)
+  if (filters.agency) {
+    const a = filters.agency.replace(/[%_,]/g, "")
+    out = out.or(`travel_agent_name.ilike.%${a}%,agent_code.ilike.%${a}%`)
+  }
+  return out
+}
+
+// PostgREST caps any single response at its configured max-rows (1000 on
+// this project). Merging two tables into one paginated, sorted list only
+// needs the top `limit` rows from EACH source, sorted the same way at the DB
+// level: taking the top-`limit` of two sorted partitions and merging always
+// yields the true top-`limit` of their union (a row past position `limit`
+// within its own source's sort order can never rank inside the merged
+// top-`limit`). This keeps page 1 fast regardless of table size instead of
+// scanning the whole table (dsr_submissions has 8,000+ rows and is growing).
+const FETCH_BATCH_SIZE = 1000
+const LIMIT_CAP = 20_000 // defensive ceiling on how deep a single request may page
+
+async function fetchTopDsrRows(
+  filters: SubmissionFilters,
+  limit: number
+): Promise<SubmissionListRow[]> {
+  const sb = getSupabaseAdmin()
+  const rows: Array<Record<string, unknown>> = []
+  let offset = 0
+  while (rows.length < limit) {
+    const batchSize = Math.min(FETCH_BATCH_SIZE, limit - offset)
+    const baseQ = sb
+      .from("dsr_submissions")
+      .select(
+        "id, visit_date, agent_type, agency_code, agency_name, visit_outcome, dmc_lead_interest, submitted_by, created_at"
+      )
+    const q = applyFilters(baseQ, filters)
+      .order("visit_date", { ascending: false })
+      .order("created_at", { ascending: false })
+      .range(offset, offset + batchSize - 1)
+    const { data, error } = await q
+    if (error) {
+      logger.error("[admin] listSubmissions dsr batch failed", { code: error.code, msg: error.message })
+      break
+    }
+    const batch = (data ?? []) as Array<Record<string, unknown>>
+    rows.push(...batch)
+    if (batch.length < batchSize) break
+    offset += batchSize
+  }
+
+  const employees = await attachSubmitterDetails(rows as Array<{ submitted_by: string }>)
+  return rows.map((r) => {
+    const e = employees.get(r.submitted_by as string)
+    return {
+      id: r.id as string,
+      source: "dsr" as const,
+      visit_date: r.visit_date as string,
+      agent_label:
+        ((r.agent_type === "registered" ? r.agency_code : r.agency_name) as string | null) ?? "—",
+      agent_sublabel: r.agent_type as string,
+      visit_outcome: r.visit_outcome as "Positive" | "Neutral" | "Negative",
+      dmc_lead_interest: r.dmc_lead_interest as boolean,
+      created_at: r.created_at as string,
+      submitter_name: e?.full_name ?? "(deleted)",
+      submitter_code: e?.employee_code ?? "—",
+    }
+  })
+}
+
+async function fetchTopMeetingRows(
+  filters: SubmissionFilters,
+  limit: number
+): Promise<SubmissionListRow[]> {
+  // A row here can never satisfy an outcome/lead filter — skip the fetch.
+  if (filters.outcome || filters.has_lead) return []
+
+  const sb = getSupabaseAdmin()
+  const rows: Array<Record<string, unknown>> = []
+  let offset = 0
+  while (rows.length < limit) {
+    const batchSize = Math.min(FETCH_BATCH_SIZE, limit - offset)
+    const baseQ = sb
+      .from("agent_meeting_reports")
+      .select("id, visit_date, travel_agent_name, submitted_by, created_at")
+    const q = applyMeetingFilters(baseQ, filters)
+      .order("visit_date", { ascending: false })
+      .order("created_at", { ascending: false })
+      .range(offset, offset + batchSize - 1)
+    const { data, error } = await q
+    if (error) {
+      logger.error("[admin] listSubmissions meeting batch failed", { code: error.code, msg: error.message })
+      break
+    }
+    const batch = (data ?? []) as Array<Record<string, unknown>>
+    rows.push(...batch)
+    if (batch.length < batchSize) break
+    offset += batchSize
+  }
+
+  const employees = await attachSubmitterDetails(rows as Array<{ submitted_by: string }>)
+  return rows.map((r) => {
+    const e = employees.get(r.submitted_by as string)
+    return {
+      id: r.id as string,
+      source: "agent_meeting" as const,
+      visit_date: r.visit_date as string,
+      agent_label: (r.travel_agent_name as string | null) ?? "—",
+      agent_sublabel: "Meeting",
+      visit_outcome: null,
+      dmc_lead_interest: null,
+      created_at: r.created_at as string,
+      submitter_name: e?.full_name ?? "(deleted)",
+      submitter_code: e?.employee_code ?? "—",
+    }
+  })
+}
+
+async function countDsrRows(filters: SubmissionFilters): Promise<number> {
+  const sb = getSupabaseAdmin()
+  const baseQ = sb.from("dsr_submissions").select("id", { count: "exact", head: true })
+  const { count, error } = await applyFilters(baseQ, filters)
+  if (error) {
+    logger.error("[admin] countDsrRows failed", { code: error.code, msg: error.message })
+    return 0
+  }
+  return count ?? 0
+}
+
+async function countMeetingRows(filters: SubmissionFilters): Promise<number> {
+  if (filters.outcome || filters.has_lead) return 0
+  const sb = getSupabaseAdmin()
+  const baseQ = sb.from("agent_meeting_reports").select("id", { count: "exact", head: true })
+  const { count, error } = await applyMeetingFilters(baseQ, filters)
+  if (error) {
+    logger.error("[admin] countMeetingRows failed", { code: error.code, msg: error.message })
+    return 0
+  }
+  return count ?? 0
+}
+
 async function attachSubmitterDetails(
   rows: ReadonlyArray<{
     submitted_by: string
@@ -97,46 +247,24 @@ export async function listSubmissions(
   const filters = filterSchema.parse(rawFilters ?? {})
   const page = filters.page ?? 1
   const pageSize = filters.pageSize ?? 50
-  const offset = (page - 1) * pageSize
+  const limit = Math.min(page * pageSize, LIMIT_CAP)
 
-  const sb = getSupabaseAdmin()
-  const baseQ = sb
-    .from("dsr_submissions")
-    .select(
-      `id, visit_date, agent_type, agency_code, agency_name,
-       visit_outcome, dmc_lead_interest,
-       submitted_by, created_at`,
-      { count: "exact" }
-    )
-  const q = applyFilters(baseQ, filters)
-    .order("visit_date", { ascending: false })
-    .order("created_at", { ascending: false })
-    .range(offset, offset + pageSize - 1)
+  const [dsrRows, meetingRows, dsrCount, meetingCount] = await Promise.all([
+    fetchTopDsrRows(filters, limit),
+    fetchTopMeetingRows(filters, limit),
+    countDsrRows(filters),
+    countMeetingRows(filters),
+  ])
 
-  const { data, count, error } = await q
-  if (error) {
-    logger.error("[admin] listSubmissions failed", { code: error.code, msg: error.message })
-    return { rows: [], total: 0, page, pageSize, totalPages: 0 }
-  }
-
-  const employees = await attachSubmitterDetails(data ?? [])
-  const rows: SubmissionListRow[] = ((data ?? []) as Array<Record<string, unknown>>).map((r) => {
-    const e = employees.get(r.submitted_by as string)
-    return {
-      id: r.id as string,
-      visit_date: r.visit_date as string,
-      agent_type: r.agent_type as "registered" | "new",
-      agency_code: (r.agency_code as string | null) ?? null,
-      agency_name: (r.agency_name as string | null) ?? null,
-      visit_outcome: r.visit_outcome as "Positive" | "Neutral" | "Negative",
-      dmc_lead_interest: r.dmc_lead_interest as boolean,
-      created_at: r.created_at as string,
-      submitter_name: e?.full_name ?? "(deleted)",
-      submitter_code: e?.employee_code ?? "—",
-    }
+  const merged = [...dsrRows, ...meetingRows].sort((a, b) => {
+    if (a.visit_date !== b.visit_date) return a.visit_date < b.visit_date ? 1 : -1
+    return a.created_at < b.created_at ? 1 : -1
   })
 
-  const total = count ?? 0
+  const total = dsrCount + meetingCount
+  const offset = (page - 1) * pageSize
+  const rows = merged.slice(offset, offset + pageSize)
+
   return {
     rows,
     total,
@@ -187,6 +315,7 @@ export async function getSubmission(id: string): Promise<SubmissionDetail | null
 // ---------------------------------------------------------------------------
 
 const CSV_COLUMNS = [
+  "source",
   "visit_date",
   "submitter_name",
   "submitter_code",
@@ -223,6 +352,15 @@ const CSV_COLUMNS = [
   "dmc_lead_interest",
   "dmc_committed_pax",
   "dmc_objection",
+  // agent_meeting_reports-only fields (blank on "dsr" rows)
+  "travel_agent_name",
+  "agent_code",
+  "city",
+  "business_aspect",
+  "current_challenges",
+  "meeting_summary",
+  "potential_queries",
+  "destinations_interested",
   "created_at",
 ] as const
 
@@ -236,6 +374,71 @@ function csvEscape(value: unknown): string {
   return s
 }
 
+// PostgREST caps any single response at its configured max-rows (1000 on
+// this project) regardless of a larger client-side .limit(), so exports must
+// page through with .range() to collect every matching row.
+const EXPORT_BATCH_SIZE = 1000
+
+async function fetchAllSubmissionsForExport(
+  filters: SubmissionFilters
+): Promise<{ ok: true; rows: Array<Record<string, unknown>> } | { ok: false; error: string }> {
+  const sb = getSupabaseAdmin()
+  const rows: Array<Record<string, unknown>> = []
+  let offset = 0
+
+  for (;;) {
+    const baseQ = sb.from("dsr_submissions").select("*")
+    const q = applyFilters(baseQ, filters)
+      .order("visit_date", { ascending: false })
+      .order("created_at", { ascending: false })
+      .range(offset, offset + EXPORT_BATCH_SIZE - 1)
+
+    const { data, error } = await q
+    if (error) {
+      logger.error("[admin] exportCsv batch failed", { code: error.code, msg: error.message })
+      return { ok: false, error: "db_error" }
+    }
+
+    const batch = (data ?? []) as Array<Record<string, unknown>>
+    rows.push(...batch)
+    if (batch.length < EXPORT_BATCH_SIZE) break
+    offset += EXPORT_BATCH_SIZE
+  }
+
+  return { ok: true, rows }
+}
+
+async function fetchAllMeetingsForExport(
+  filters: SubmissionFilters
+): Promise<{ ok: true; rows: Array<Record<string, unknown>> } | { ok: false; error: string }> {
+  if (filters.outcome || filters.has_lead) return { ok: true, rows: [] }
+
+  const sb = getSupabaseAdmin()
+  const rows: Array<Record<string, unknown>> = []
+  let offset = 0
+
+  for (;;) {
+    const baseQ = sb.from("agent_meeting_reports").select("*")
+    const q = applyMeetingFilters(baseQ, filters)
+      .order("visit_date", { ascending: false })
+      .order("created_at", { ascending: false })
+      .range(offset, offset + EXPORT_BATCH_SIZE - 1)
+
+    const { data, error } = await q
+    if (error) {
+      logger.error("[admin] exportCsv meeting batch failed", { code: error.code, msg: error.message })
+      return { ok: false, error: "db_error" }
+    }
+
+    const batch = (data ?? []) as Array<Record<string, unknown>>
+    rows.push(...batch)
+    if (batch.length < EXPORT_BATCH_SIZE) break
+    offset += EXPORT_BATCH_SIZE
+  }
+
+  return { ok: true, rows }
+}
+
 export async function exportSubmissionsCsv(
   rawFilters: Partial<SubmissionFilters>
 ): Promise<{ ok: true; csv: string; rowCount: number } | { ok: false; error: string }> {
@@ -243,22 +446,28 @@ export async function exportSubmissionsCsv(
   const parsed = filterSchema.safeParse(rawFilters ?? {})
   if (!parsed.success) return { ok: false, error: "invalid_filters" }
 
-  const sb = getSupabaseAdmin()
-  const baseQ = sb
-    .from("dsr_submissions")
-    .select("*")
-  const q = applyFilters(baseQ, parsed.data)
-    .order("visit_date", { ascending: false })
-    .order("created_at", { ascending: false })
-    .limit(10_000)
+  const dsrResult = await fetchAllSubmissionsForExport(parsed.data)
+  if (!dsrResult.ok) return dsrResult
+  const meetingResult = await fetchAllMeetingsForExport(parsed.data)
+  if (!meetingResult.ok) return meetingResult
 
-  const { data, error } = await q
-  if (error) {
-    logger.error("[admin] exportCsv failed", { code: error.code, msg: error.message })
-    return { ok: false, error: "db_error" }
-  }
+  const dsrRows: Array<Record<string, unknown>> = dsrResult.rows.map((r) => ({
+    ...r,
+    source: "dsr",
+  }))
+  const meetingRows: Array<Record<string, unknown>> = meetingResult.rows.map((r) => ({
+    ...r,
+    source: "agent_meeting",
+  }))
+  const rows = [...dsrRows, ...meetingRows].sort((a, b) => {
+    const ad = a.visit_date as string
+    const bd = b.visit_date as string
+    if (ad !== bd) return ad < bd ? 1 : -1
+    const ac = a.created_at as string
+    const bc = b.created_at as string
+    return ac < bc ? 1 : -1
+  })
 
-  const rows = (data ?? []) as Array<Record<string, unknown>>
   const submitters = await attachSubmitterDetails(
     rows as Array<{ submitted_by: string }>
   )

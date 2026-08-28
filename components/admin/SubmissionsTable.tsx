@@ -12,7 +12,9 @@ import { Badge } from "@/components/ui/badge"
 import type { SubmissionListRow } from "@/app/_actions/submissions"
 import { cn } from "@/lib/utils"
 
-const outcomeStyles: Record<SubmissionListRow["visit_outcome"], string> = {
+type Outcome = "Positive" | "Neutral" | "Negative"
+
+const outcomeStyles: Record<Outcome, string> = {
   Positive:
     "border-emerald-300/60 bg-emerald-50 text-emerald-800 dark:border-emerald-700/40 dark:bg-emerald-950/40 dark:text-emerald-300",
   Neutral:
@@ -68,13 +70,13 @@ export function SubmissionsTable({ rows }: { rows: SubmissionListRow[] }) {
         </TableHeader>
         <TableBody>
           {rows.map((r) => {
-            const agentLabel =
-              r.agent_type === "registered"
-                ? r.agency_code ?? "—"
-                : r.agency_name ?? "—"
+            const href =
+              r.source === "dsr"
+                ? `/admin/submissions/${r.id}`
+                : `/admin/submissions/meeting/${r.id}`
             return (
               <TableRow
-                key={r.id}
+                key={`${r.source}:${r.id}`}
                 className="border-border/60 align-middle transition-colors hover:bg-muted/40"
               >
                 <TableCell className="whitespace-nowrap text-sm tabular-nums">
@@ -87,21 +89,25 @@ export function SubmissionsTable({ rows }: { rows: SubmissionListRow[] }) {
                   </div>
                 </TableCell>
                 <TableCell className="text-sm">
-                  <div className="font-medium">{agentLabel}</div>
+                  <div className="font-medium">{r.agent_label}</div>
                   <div className="text-xs uppercase tracking-wider text-muted-foreground">
-                    {r.agent_type}
+                    {r.agent_sublabel}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Badge
-                    variant="secondary"
-                    className={cn(
-                      "border font-normal",
-                      outcomeStyles[r.visit_outcome]
-                    )}
-                  >
-                    {r.visit_outcome}
-                  </Badge>
+                  {r.visit_outcome ? (
+                    <Badge
+                      variant="secondary"
+                      className={cn(
+                        "border font-normal",
+                        outcomeStyles[r.visit_outcome]
+                      )}
+                    >
+                      {r.visit_outcome}
+                    </Badge>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">—</span>
+                  )}
                 </TableCell>
                 <TableCell>
                   {r.dmc_lead_interest ? (
@@ -117,7 +123,7 @@ export function SubmissionsTable({ rows }: { rows: SubmissionListRow[] }) {
                 </TableCell>
                 <TableCell className="text-right text-sm">
                   <Link
-                    href={`/admin/submissions/${r.id}`}
+                    href={href}
                     className="text-foreground underline-offset-4 hover:underline"
                   >
                     View →

@@ -128,6 +128,7 @@ curl -s \
   "data": [
     {
       "id": "3f7c1e0a-9b2d-4c8e-8a11-6a5b4c3d2e1f",
+      "type": "dsr_visit",
       "visit_date": "2026-06-30",
       "submitter": {
         "id": "a1b2c3d4-e5f6-4788-9a0b-1c2d3e4f5a6b",
@@ -174,20 +175,52 @@ curl -s \
         "visit_outcome": "Positive",
         "visit_commitment": "Send quote"
       },
+      "agent_meeting": null,
       "created_at": "2026-06-30T09:15:42.512Z",
       "updated_at": "2026-06-30T09:15:42.512Z"
+    },
+    {
+      "id": "9c5b2e1d-4a3f-4c8e-8a11-6a5b4c3d2e1f",
+      "type": "agent_meeting",
+      "visit_date": "2026-08-27",
+      "submitter": {
+        "id": "0cdce869-e363-416b-a39c-3c5d817eba0b",
+        "name": "Karan Makdani",
+        "employee_code": "EC052"
+      },
+      "header": null,
+      "flight": null,
+      "hotel": null,
+      "dmc": null,
+      "close": null,
+      "agent_meeting": {
+        "travel_agent_name": "Kivi Holidays",
+        "agent_code": "NA",
+        "city": "Rajkot",
+        "business_aspect": "NA",
+        "current_challenges": "NA",
+        "meeting_summary": "Met for ongoing Thailand and Dubai queries",
+        "potential_queries": "Thailand",
+        "destinations_interested": ["Thailand", "Vietnam", "Bali", "Dubai"]
+      },
+      "created_at": "2026-08-27T14:32:07.848Z",
+      "updated_at": "2026-08-27T14:32:07.848Z"
     }
   ],
   "pagination": {
     "page": 1,
     "page_size": 50,
-    "total": 1,
+    "total": 2,
     "total_pages": 1,
     "has_next": false,
     "has_prev": false
   }
 }
 ```
+
+`outcome` and `has_lead` only ever match `dsr_visit` rows — an `agent_meeting`
+row has no notion of either, so it's simply excluded from the results
+whenever one of those filters is set.
 
 ### 4.2 Get a single visit
 
@@ -217,23 +250,34 @@ If no visit has that id, the response is `404` with error code `not_found`.
 
 ## 5. The visit object
 
-Every field below is always present. The five sections (`header`, `flight`,
-`hotel`, `dmc`, `close`) mirror the report the field-sales rep fills in.
+There are two kinds of visit, distinguished by `type`:
+
+- **`dsr_visit`** — a standard field-sales report. `header`, `flight`,
+  `hotel`, `dmc`, and `close` are all populated; `agent_meeting` is `null`.
+- **`agent_meeting`** — a standalone agent-meeting report (currently
+  submitted by one employee, Karan Makdani; see `docs` in the repo for
+  `app/_actions/agent-meeting.ts`). `header`/`flight`/`hotel`/`dmc`/`close`
+  are all `null`; `agent_meeting` is populated instead.
+
+Always check `type` before reading either set of fields — exactly one side
+is populated, never both, and which one depends on `type`.
 
 ### Top level
 
-| Field        | Type   | Notes |
-|--------------|--------|-------|
-| `id`         | string (uuid) | Unique visit id. |
-| `visit_date` | string (date) | `YYYY-MM-DD`, in IST. The day the visit was logged. |
-| `submitter`  | object | The employee who submitted the report (see below). |
-| `header`     | object | Agency identification. |
-| `flight`     | object | Flight business section. |
-| `hotel`      | object | Hotel business section. |
-| `dmc`        | object | DMC (destination management) business section. |
-| `close`      | object | Visit outcome and commitment. |
-| `created_at` | string (ISO 8601) | When the row was created (UTC). |
-| `updated_at` | string (ISO 8601) | When the row was last modified (UTC). |
+| Field           | Type   | Notes |
+|-----------------|--------|-------|
+| `id`            | string (uuid) | Unique visit id. |
+| `type`          | enum   | `dsr_visit` or `agent_meeting`. Determines which sections below are populated. |
+| `visit_date`    | string (date) | `YYYY-MM-DD`, in IST. The day the visit was logged. |
+| `submitter`     | object | The employee who submitted the report (see below). |
+| `header`        | object / null | Agency identification. `dsr_visit` only. |
+| `flight`        | object / null | Flight business section. `dsr_visit` only. |
+| `hotel`         | object / null | Hotel business section. `dsr_visit` only. |
+| `dmc`           | object / null | DMC (destination management) business section. `dsr_visit` only. |
+| `close`         | object / null | Visit outcome and commitment. `dsr_visit` only. |
+| `agent_meeting` | object / null | Meeting details. `agent_meeting` only — see below. |
+| `created_at`    | string (ISO 8601) | When the row was created (UTC). |
+| `updated_at`    | string (ISO 8601) | When the row was last modified (UTC). |
 
 ### `submitter`
 
@@ -302,6 +346,21 @@ Exactly one of `agency_code` / `agency_name` is non-null for any visit.
 |--------------------|--------|-------|
 | `visit_outcome`    | enum   | `Positive`, `Neutral`, or `Negative`. |
 | `visit_commitment` | string | What the rep committed to the agent. |
+
+### `agent_meeting`
+
+Present only when `type` is `agent_meeting`; `null` for `dsr_visit` rows.
+
+| Field                      | Type     | Notes |
+|----------------------------|----------|-------|
+| `travel_agent_name`        | string   | Agent or agency name. |
+| `agent_code`               | string   | Agent code (free text). |
+| `city`                     | string   | City the meeting took place in. |
+| `business_aspect`          | string   | Business aspect discussed. |
+| `current_challenges`       | string   | Current challenges or feedback raised. |
+| `meeting_summary`          | string   | Summary of the meeting. |
+| `potential_queries`        | string   | Potential queries raised. |
+| `destinations_interested`  | string[] | Subset of `Dubai`, `Bali`, `Vietnam`, `Thailand`, `Maldives`, `Others`. At least one. |
 
 The multi-select fields (`domestic_portals`, `hotel.primary_platform`,
 `dmc.destination_discussed`, and so on) draw from an admin-managed option list

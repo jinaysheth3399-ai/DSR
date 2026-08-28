@@ -45,8 +45,27 @@ export type EscalationRef = {
   booking_id: string | null
 }
 
+// Meeting-report fields for type: "agent_meeting" visits (see
+// agent_meeting_reports / app/_actions/agent-meeting.ts). This is a
+// standalone form for a single employee, unrelated to the five dsr_submissions
+// sections, so it gets its own section instead of being forced into them.
+export type ApiAgentMeeting = {
+  travel_agent_name: string
+  agent_code: string
+  city: string
+  business_aspect: string
+  current_challenges: string
+  meeting_summary: string
+  potential_queries: string
+  destinations_interested: string[]
+}
+
 export type ApiVisit = {
   id: string
+  // "dsr_visit" rows always have header/flight/hotel/dmc/close populated and
+  // agent_meeting: null. "agent_meeting" rows are the reverse. Check `type`
+  // before reading either.
+  type: "dsr_visit" | "agent_meeting"
   visit_date: string
   submitter: {
     id: string
@@ -57,7 +76,7 @@ export type ApiVisit = {
     agent_type: "registered" | "new"
     agency_code: string | null
     agency_name: string | null
-  }
+  } | null
   flight: {
     escalation: EscalationRef
     monthly_txn_lakhs: number
@@ -69,7 +88,7 @@ export type ApiVisit = {
     client_type: string
     payment_mode: string
     credit_type: string | null
-  }
+  } | null
   hotel: {
     escalation: EscalationRef
     monthly_room_nights_other: number
@@ -78,7 +97,7 @@ export type ApiVisit = {
     committed_room_nights: number
     category_preference: string[]
     issue_complaint: string | null
-  }
+  } | null
   dmc: {
     escalation: EscalationRef
     destination_discussed: string[]
@@ -88,11 +107,12 @@ export type ApiVisit = {
     lead_interest: boolean
     committed_pax: number
     objection: string[]
-  }
+  } | null
   close: {
     visit_outcome: "Positive" | "Neutral" | "Negative"
     visit_commitment: string
-  }
+  } | null
+  agent_meeting: ApiAgentMeeting | null
   created_at: string
   updated_at: string
 }
@@ -126,6 +146,13 @@ const VISIT_COLUMNS = `
   dmc_agent_active, dmc_current_vendor, dmc_current_vendor_pax,
   dmc_lead_interest, dmc_committed_pax, dmc_objection,
   visit_outcome, visit_commitment,
+  created_at, updated_at
+`
+
+const AGENT_MEETING_COLUMNS = `
+  id, submitted_by, visit_date,
+  travel_agent_name, agent_code, city, business_aspect,
+  current_challenges, meeting_summary, potential_queries, destinations_interested,
   created_at, updated_at
 `
 
@@ -174,6 +201,7 @@ export function serializeVisit(
   const submittedBy = row.submitted_by as string
   return {
     id: row.id as string,
+    type: "dsr_visit",
     visit_date: row.visit_date as string,
     submitter: submitter ?? {
       id: submittedBy,
@@ -229,6 +257,41 @@ export function serializeVisit(
       visit_outcome: row.visit_outcome as "Positive" | "Neutral" | "Negative",
       visit_commitment: row.visit_commitment as string,
     },
+    agent_meeting: null,
+    created_at: row.created_at as string,
+    updated_at: row.updated_at as string,
+  }
+}
+
+export function serializeAgentMeeting(
+  row: Record<string, unknown>,
+  submitter: SubmitterInfo | undefined
+): ApiVisit {
+  const submittedBy = row.submitted_by as string
+  return {
+    id: row.id as string,
+    type: "agent_meeting",
+    visit_date: row.visit_date as string,
+    submitter: submitter ?? {
+      id: submittedBy,
+      name: "(unknown)",
+      employee_code: "",
+    },
+    header: null,
+    flight: null,
+    hotel: null,
+    dmc: null,
+    close: null,
+    agent_meeting: {
+      travel_agent_name: row.travel_agent_name as string,
+      agent_code: row.agent_code as string,
+      city: row.city as string,
+      business_aspect: row.business_aspect as string,
+      current_challenges: row.current_challenges as string,
+      meeting_summary: row.meeting_summary as string,
+      potential_queries: row.potential_queries as string,
+      destinations_interested: strArray(row.destinations_interested),
+    },
     created_at: row.created_at as string,
     updated_at: row.updated_at as string,
   }
@@ -242,53 +305,145 @@ export type ListVisitsResult =
   | { ok: true; data: ApiVisit[]; pagination: Pagination }
   | { ok: false; error: string }
 
-export async function listVisits(query: VisitsQuery): Promise<ListVisitsResult> {
-  const sb = getSupabaseAdmin()
-  const { page, page_size: pageSize } = query
-  const offset = (page - 1) * pageSize
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let q: any = sb.from("dsr_submissions").select(VISIT_COLUMNS, { count: "exact" })
-
-  if (query.date_from) q = q.gte("visit_date", query.date_from)
-  if (query.date_to) q = q.lte("visit_date", query.date_to)
-  if (query.outcome) q = q.eq("visit_outcome", query.outcome)
-  if (query.submitted_by) q = q.eq("submitted_by", query.submitted_by)
-  if (query.has_lead === "true") q = q.eq("dmc_lead_interest", true)
-  if (query.has_lead === "false") q = q.eq("dmc_lead_interest", false)
-  if (query.updated_since) q = q.gte("updated_at", query.updated_since)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyDsrFilters(q: any, query: VisitsQuery): any {
+  let out = q
+  if (query.date_from) out = out.gte("visit_date", query.date_from)
+  if (query.date_to) out = out.lte("visit_date", query.date_to)
+  if (query.outcome) out = out.eq("visit_outcome", query.outcome)
+  if (query.submitted_by) out = out.eq("submitted_by", query.submitted_by)
+  if (query.has_lead === "true") out = out.eq("dmc_lead_interest", true)
+  if (query.has_lead === "false") out = out.eq("dmc_lead_interest", false)
+  if (query.updated_since) out = out.gte("updated_at", query.updated_since)
   if (query.agency) {
     // Strip PostgREST filter metacharacters so the term cannot alter the
     // or() grammar (`,` separates conditions, `()` groups them, `%_` are
     // ilike wildcards).
     const a = query.agency.replace(/[%_,()]/g, "")
-    if (a.length > 0) {
-      q = q.or(`agency_code.ilike.%${a}%,agency_name.ilike.%${a}%`)
+    if (a.length > 0) out = out.or(`agency_code.ilike.%${a}%,agency_name.ilike.%${a}%`)
+  }
+  return out
+}
+
+// agent_meeting_reports has no outcome/lead concept — a row can never match
+// those filters, so callers skip fetching this table when either is set.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyMeetingFilters(q: any, query: VisitsQuery): any {
+  let out = q
+  if (query.date_from) out = out.gte("visit_date", query.date_from)
+  if (query.date_to) out = out.lte("visit_date", query.date_to)
+  if (query.submitted_by) out = out.eq("submitted_by", query.submitted_by)
+  if (query.updated_since) out = out.gte("updated_at", query.updated_since)
+  if (query.agency) {
+    const a = query.agency.replace(/[%_,()]/g, "")
+    if (a.length > 0) out = out.or(`travel_agent_name.ilike.%${a}%,agent_code.ilike.%${a}%`)
+  }
+  return out
+}
+
+// PostgREST caps any single response at its configured max-rows (1000 on
+// this project). Merging two tables into one paginated, sorted list only
+// needs the top `limit` rows from EACH source, sorted the same way at the DB
+// level: taking the top-`limit` of two sorted partitions and merging always
+// yields the true top-`limit` of their union (a row past position `limit`
+// within its own source's sort order can never rank inside the merged
+// top-`limit`, since `limit` higher-or-equal rows from its own source
+// already precede it). This keeps a request for "page 1" fast regardless of
+// table size instead of scanning the whole table (this project's
+// dsr_submissions has 8,000+ rows and is only growing).
+const FETCH_BATCH_SIZE = 1000
+const LIMIT_CAP = 20_000 // defensive ceiling on how deep a single request may page
+
+async function fetchTopRows(
+  table: string,
+  columns: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  applyFilters: (q: any, query: VisitsQuery) => any,
+  query: VisitsQuery,
+  limit: number
+): Promise<Array<Record<string, unknown>>> {
+  const sb = getSupabaseAdmin()
+  const rows: Array<Record<string, unknown>> = []
+  let offset = 0
+  while (rows.length < limit) {
+    const batchSize = Math.min(FETCH_BATCH_SIZE, limit - offset)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let q: any = sb.from(table).select(columns)
+    q = applyFilters(q, query)
+      .order(query.sort, { ascending: query.order === "asc" })
+      .order("id", { ascending: true }) // stable tiebreaker
+      .range(offset, offset + batchSize - 1)
+    const { data, error } = await q
+    if (error) {
+      logger.error(`[api] fetchTopRows(${table}) failed`, { code: error.code, msg: error.message })
+      break
     }
+    const batch = (data ?? []) as Array<Record<string, unknown>>
+    rows.push(...batch)
+    if (batch.length < batchSize) break // exhausted this source
+    offset += batchSize
   }
+  return rows
+}
 
-  q = q
-    .order(query.sort, { ascending: query.order === "asc" })
-    .order("id", { ascending: true }) // stable tiebreaker for deterministic paging
-    .range(offset, offset + pageSize - 1)
-
-  const { data, count, error } = await q
+async function countRows(
+  table: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  applyFilters: (q: any, query: VisitsQuery) => any,
+  query: VisitsQuery
+): Promise<number> {
+  const sb = getSupabaseAdmin()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let q: any = sb.from(table).select("id", { count: "exact", head: true })
+  q = applyFilters(q, query)
+  const { count, error } = await q
   if (error) {
-    logger.error("[api] listVisits failed", { code: error.code, msg: error.message })
-    return { ok: false, error: "db_error" }
+    logger.error(`[api] countRows(${table}) failed`, { code: error.code, msg: error.message })
+    return 0
   }
+  return count ?? 0
+}
 
-  const rows = (data ?? []) as Array<Record<string, unknown>>
-  const submitters = await fetchSubmitters(rows.map((r) => r.submitted_by as string))
-  const visits = rows.map((r) =>
-    serializeVisit(r, submitters.get(r.submitted_by as string))
+export async function listVisits(query: VisitsQuery): Promise<ListVisitsResult> {
+  const { page, page_size: pageSize } = query
+  const limit = Math.min(page * pageSize, LIMIT_CAP)
+  const includeMeetings = !query.outcome && !query.has_lead
+
+  const [dsrTop, meetingTop, dsrCount, meetingCount] = await Promise.all([
+    fetchTopRows("dsr_submissions", VISIT_COLUMNS, applyDsrFilters, query, limit),
+    includeMeetings
+      ? fetchTopRows("agent_meeting_reports", AGENT_MEETING_COLUMNS, applyMeetingFilters, query, limit)
+      : Promise.resolve([]),
+    countRows("dsr_submissions", applyDsrFilters, query),
+    includeMeetings ? countRows("agent_meeting_reports", applyMeetingFilters, query) : Promise.resolve(0),
+  ])
+
+  const submitters = await fetchSubmitters(
+    [...dsrTop, ...meetingTop].map((r) => r.submitted_by as string)
   )
 
-  const total = count ?? 0
+  const merged: ApiVisit[] = [
+    ...dsrTop.map((r) => serializeVisit(r, submitters.get(r.submitted_by as string))),
+    ...meetingTop.map((r) => serializeAgentMeeting(r, submitters.get(r.submitted_by as string))),
+  ]
+
+  const sortKey = query.sort
+  const dir = query.order === "asc" ? 1 : -1
+  merged.sort((a, b) => {
+    const av = a[sortKey]
+    const bv = b[sortKey]
+    if (av === bv) return a.id < b.id ? -1 : 1 // stable tiebreaker
+    return av < bv ? -dir : dir
+  })
+
+  const total = dsrCount + meetingCount
+  const offset = (page - 1) * pageSize
+  const data = merged.slice(offset, offset + pageSize)
   const totalPages = total === 0 ? 0 : Math.ceil(total / pageSize)
+
   return {
     ok: true,
-    data: visits,
+    data,
     pagination: {
       page,
       page_size: pageSize,
@@ -320,12 +475,39 @@ export async function getVisitById(id: string): Promise<GetVisitResult> {
     logger.error("[api] getVisitById failed", { code: error.code, msg: error.message })
     return { ok: false, error: "db_error" }
   }
-  if (!row) return { ok: true, visit: null }
+  if (row) {
+    const typedRow = row as Record<string, unknown>
+    const submitters = await fetchSubmitters([typedRow.submitted_by as string])
+    return {
+      ok: true,
+      visit: serializeVisit(typedRow, submitters.get(typedRow.submitted_by as string)),
+    }
+  }
 
-  const typedRow = row as Record<string, unknown>
-  const submitters = await fetchSubmitters([typedRow.submitted_by as string])
+  // Not a dsr_submissions row — the same id could belong to a standalone
+  // agent meeting report (uuid namespaces are independent per table).
+  const { data: meetingRow, error: meetingError } = await sb
+    .from("agent_meeting_reports")
+    .select(AGENT_MEETING_COLUMNS)
+    .eq("id", id)
+    .maybeSingle()
+
+  if (meetingError) {
+    logger.error("[api] getVisitById meeting lookup failed", {
+      code: meetingError.code,
+      msg: meetingError.message,
+    })
+    return { ok: false, error: "db_error" }
+  }
+  if (!meetingRow) return { ok: true, visit: null }
+
+  const typedMeetingRow = meetingRow as Record<string, unknown>
+  const submitters = await fetchSubmitters([typedMeetingRow.submitted_by as string])
   return {
     ok: true,
-    visit: serializeVisit(typedRow, submitters.get(typedRow.submitted_by as string)),
+    visit: serializeAgentMeeting(
+      typedMeetingRow,
+      submitters.get(typedMeetingRow.submitted_by as string)
+    ),
   }
 }
