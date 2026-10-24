@@ -149,6 +149,7 @@ export function SubmissionDetailView({ submission }: { submission: Submission })
             <Field label="Lead generated?">{val(s.dmc_lead_interest)}</Field>
             <Field label="Committed pax to Etrav">{val(s.dmc_committed_pax)}</Field>
             <Field label="Objection" className="sm:col-span-2">{val(s.dmc_objection)}</Field>
+            <Field label="Essential information given">{val(s.dmc_essential_info_given)}</Field>
           </dl>
         </CardContent>
       </Card>

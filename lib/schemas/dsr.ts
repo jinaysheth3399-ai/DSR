@@ -59,6 +59,7 @@ export const dsrFormSchema = z
     dmc_lead_interest:         z.boolean(),
     dmc_committed_pax:         z.number().int("Whole number").min(0),
     dmc_objection:             z.array(z.string()),
+    dmc_essential_info_given:  z.boolean(),
 
     // VISIT CLOSE
     visit_outcome:    z.enum(VISIT_OUTCOMES),
@@ -160,6 +161,7 @@ export const STEP_FIELDS = {
     "dmc_lead_interest",
     "dmc_committed_pax",
     "dmc_objection",
+    "dmc_essential_info_given",
   ],
   close: ["visit_outcome", "visit_commitment"],
 } as const satisfies Record<StepKey, ReadonlyArray<keyof DsrFormValues>>
@@ -204,6 +206,7 @@ export const dsrFormDefaults: DsrFormValues = {
   dmc_lead_interest: false,
   dmc_committed_pax: 0,
   dmc_objection: [],
+  dmc_essential_info_given: false,
 
   visit_outcome: "Positive",
   visit_commitment: "",

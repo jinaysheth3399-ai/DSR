@@ -352,6 +352,7 @@ const CSV_COLUMNS = [
   "dmc_lead_interest",
   "dmc_committed_pax",
   "dmc_objection",
+  "dmc_essential_info_given",
   // agent_meeting_reports-only fields (blank on "dsr" rows)
   "travel_agent_name",
   "agent_code",

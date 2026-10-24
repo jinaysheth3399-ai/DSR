@@ -107,6 +107,8 @@ export type ApiVisit = {
     lead_interest: boolean
     committed_pax: number
     objection: string[]
+    // null on visits submitted before this question was added
+    essential_info_given: boolean | null
   } | null
   close: {
     visit_outcome: "Positive" | "Neutral" | "Negative"
@@ -144,7 +146,7 @@ const VISIT_COLUMNS = `
   hotel_issue_complaint,
   dmc_escalation_has_ref, dmc_escalation_booking_id, dmc_destination_discussed,
   dmc_agent_active, dmc_current_vendor, dmc_current_vendor_pax,
-  dmc_lead_interest, dmc_committed_pax, dmc_objection,
+  dmc_lead_interest, dmc_committed_pax, dmc_objection, dmc_essential_info_given,
   visit_outcome, visit_commitment,
   created_at, updated_at
 `
@@ -252,6 +254,8 @@ export function serializeVisit(
       lead_interest: Boolean(row.dmc_lead_interest),
       committed_pax: num(row.dmc_committed_pax),
       objection: strArray(row.dmc_objection),
+      essential_info_given:
+        (row.dmc_essential_info_given as boolean | null) ?? null,
     },
     close: {
       visit_outcome: row.visit_outcome as "Positive" | "Neutral" | "Negative",

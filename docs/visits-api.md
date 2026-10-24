@@ -169,7 +169,8 @@ curl -s \
         "current_vendor_pax": 60,
         "lead_interest": true,
         "committed_pax": 25,
-        "objection": ["Price"]
+        "objection": ["Price"],
+        "essential_info_given": true
       },
       "close": {
         "visit_outcome": "Positive",
@@ -339,6 +340,7 @@ Exactly one of `agency_code` / `agency_name` is non-null for any visit.
 | `lead_interest`         | boolean       | Whether the visit produced a DMC lead. Matches the `has_lead` filter. |
 | `committed_pax`         | number        | Pax the agent committed to Etrav (integer). |
 | `objection`             | string[]      | Objections raised. May be empty. |
+| `essential_info_given`  | boolean / null | Whether the rep gave the agent the essential DMC information. `null` on visits submitted before this question was introduced, which is distinct from `false`. |
 
 ### `close`
 

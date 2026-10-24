@@ -156,6 +156,7 @@ export async function submitDsr(
     dmc_lead_interest: data.dmc_lead_interest,
     dmc_committed_pax: data.dmc_committed_pax,
     dmc_objection: data.dmc_objection,
+    dmc_essential_info_given: data.dmc_essential_info_given,
 
     visit_outcome: data.visit_outcome,
     visit_commitment: data.visit_commitment,

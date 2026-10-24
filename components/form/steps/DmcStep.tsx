@@ -109,6 +109,11 @@ export function DmcStep({
           </FormItem>
         )}
       />
+
+      <YesNoField
+        name="dmc_essential_info_given"
+        label="Essential information given"
+      />
     </div>
   )
 }
