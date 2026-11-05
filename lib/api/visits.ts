@@ -345,47 +345,84 @@ function applyMeetingFilters(q: any, query: VisitsQuery): any {
   return out
 }
 
-// PostgREST caps any single response at its configured max-rows (1000 on
-// this project). Merging two tables into one paginated, sorted list only
-// needs the top `limit` rows from EACH source, sorted the same way at the DB
-// level: taking the top-`limit` of two sorted partitions and merging always
-// yields the true top-`limit` of their union (a row past position `limit`
-// within its own source's sort order can never rank inside the merged
-// top-`limit`, since `limit` higher-or-equal rows from its own source
-// already precede it). This keeps a request for "page 1" fast regardless of
-// table size instead of scanning the whole table (this project's
-// dsr_submissions has 8,000+ rows and is only growing).
-const FETCH_BATCH_SIZE = 1000
+// Merging two tables into one sorted, paginated list only needs the top
+// `limit` rows from EACH source, sorted the same way at the DB level: a row
+// past position `limit` in its own source's order can never rank inside the
+// merged top-`limit`, since `limit` higher-or-equal rows from that source
+// already precede it.
+//
+// That top-`limit` grows with page depth, so it is gathered in two phases.
+// Phase 1 fetches only (id, sort column) for the top `limit` keys, which the
+// (created_at, id) / (updated_at, id) / visit_date indexes serve as index-only
+// scans. Phase 2 loads full rows for the one page actually being returned.
+// Previously phase 1 fetched every full row up to the requested depth and
+// threw most of them away: a client paging through everything made Postgres
+// read and ship the whole table again for every page, which was ~80% of all
+// database work and is what saturated the database.
+const FETCH_BATCH_SIZE = 1000 // PostgREST max-rows on this project
 const LIMIT_CAP = 20_000 // defensive ceiling on how deep a single request may page
+const ID_CHUNK = 100 // keep `id=in.(...)` URLs well under gateway length limits
 
-async function fetchTopRows(
+// A database read failed (including the client-side timeout). Surfaced as a
+// retryable 500 rather than silently serving a short or wrong page.
+class DbReadError extends Error {}
+
+type SortKey = { id: string; sort: string; source: "dsr" | "agent_meeting" }
+
+async function fetchTopKeys(
   table: string,
-  columns: string,
+  source: SortKey["source"],
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   applyFilters: (q: any, query: VisitsQuery) => any,
   query: VisitsQuery,
   limit: number
-): Promise<Array<Record<string, unknown>>> {
+): Promise<SortKey[]> {
   const sb = getSupabaseAdmin()
-  const rows: Array<Record<string, unknown>> = []
+  const keys: SortKey[] = []
   let offset = 0
-  while (rows.length < limit) {
+  while (keys.length < limit) {
     const batchSize = Math.min(FETCH_BATCH_SIZE, limit - offset)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let q: any = sb.from(table).select(columns)
+    let q: any = sb.from(table).select(`id, ${query.sort}`)
     q = applyFilters(q, query)
       .order(query.sort, { ascending: query.order === "asc" })
       .order("id", { ascending: true }) // stable tiebreaker
       .range(offset, offset + batchSize - 1)
     const { data, error } = await q
     if (error) {
-      logger.error(`[api] fetchTopRows(${table}) failed`, { code: error.code, msg: error.message })
-      break
+      logger.error(`[api] fetchTopKeys(${table}) failed`, { code: error.code, msg: error.message })
+      throw new DbReadError(table)
     }
     const batch = (data ?? []) as Array<Record<string, unknown>>
-    rows.push(...batch)
+    for (const r of batch) {
+      keys.push({ id: r.id as string, sort: r[query.sort] as string, source })
+    }
     if (batch.length < batchSize) break // exhausted this source
     offset += batchSize
+  }
+  return keys
+}
+
+async function fetchRowsByIds(
+  table: string,
+  columns: string,
+  ids: string[]
+): Promise<Array<Record<string, unknown>>> {
+  const sb = getSupabaseAdmin()
+  const chunks: string[][] = []
+  for (let i = 0; i < ids.length; i += ID_CHUNK) chunks.push(ids.slice(i, i + ID_CHUNK))
+  // Primary-key lookups of at most ID_CHUNK rows each: cheap enough to run
+  // concurrently, which matters because every round trip crosses regions.
+  const results = await Promise.all(
+    chunks.map((chunk) => sb.from(table).select(columns).in("id", chunk))
+  )
+  const rows: Array<Record<string, unknown>> = []
+  for (const { data, error } of results) {
+    if (error) {
+      logger.error(`[api] fetchRowsByIds(${table}) failed`, { code: error.code, msg: error.message })
+      throw new DbReadError(table)
+    }
+    rows.push(...((data ?? []) as unknown as Array<Record<string, unknown>>))
   }
   return rows
 }
@@ -403,7 +440,7 @@ async function countRows(
   const { count, error } = await q
   if (error) {
     logger.error(`[api] countRows(${table}) failed`, { code: error.code, msg: error.message })
-    return 0
+    throw new DbReadError(table)
   }
   return count ?? 0
 }
@@ -413,49 +450,74 @@ export async function listVisits(query: VisitsQuery): Promise<ListVisitsResult> 
   const limit = Math.min(page * pageSize, LIMIT_CAP)
   const includeMeetings = !query.outcome && !query.has_lead
 
-  const [dsrTop, meetingTop, dsrCount, meetingCount] = await Promise.all([
-    fetchTopRows("dsr_submissions", VISIT_COLUMNS, applyDsrFilters, query, limit),
-    includeMeetings
-      ? fetchTopRows("agent_meeting_reports", AGENT_MEETING_COLUMNS, applyMeetingFilters, query, limit)
-      : Promise.resolve([]),
-    countRows("dsr_submissions", applyDsrFilters, query),
-    includeMeetings ? countRows("agent_meeting_reports", applyMeetingFilters, query) : Promise.resolve(0),
-  ])
+  try {
+    // Phase 1: narrow sort keys only, plus totals.
+    const [dsrKeys, meetingKeys, dsrCount, meetingCount] = await Promise.all([
+      fetchTopKeys("dsr_submissions", "dsr", applyDsrFilters, query, limit),
+      includeMeetings
+        ? fetchTopKeys("agent_meeting_reports", "agent_meeting", applyMeetingFilters, query, limit)
+        : Promise.resolve([] as SortKey[]),
+      countRows("dsr_submissions", applyDsrFilters, query),
+      includeMeetings ? countRows("agent_meeting_reports", applyMeetingFilters, query) : Promise.resolve(0),
+    ])
 
-  const submitters = await fetchSubmitters(
-    [...dsrTop, ...meetingTop].map((r) => r.submitted_by as string)
-  )
+    const dir = query.order === "asc" ? 1 : -1
+    const merged = [...dsrKeys, ...meetingKeys].sort((a, b) => {
+      if (a.sort === b.sort) return a.id < b.id ? -1 : 1 // stable tiebreaker
+      return a.sort < b.sort ? -dir : dir
+    })
 
-  const merged: ApiVisit[] = [
-    ...dsrTop.map((r) => serializeVisit(r, submitters.get(r.submitted_by as string))),
-    ...meetingTop.map((r) => serializeAgentMeeting(r, submitters.get(r.submitted_by as string))),
-  ]
+    const offset = (page - 1) * pageSize
+    const pageKeys = merged.slice(offset, offset + pageSize)
 
-  const sortKey = query.sort
-  const dir = query.order === "asc" ? 1 : -1
-  merged.sort((a, b) => {
-    const av = a[sortKey]
-    const bv = b[sortKey]
-    if (av === bv) return a.id < b.id ? -1 : 1 // stable tiebreaker
-    return av < bv ? -dir : dir
-  })
+    // Phase 2: full rows for this page only.
+    const [dsrRows, meetingRows] = await Promise.all([
+      fetchRowsByIds(
+        "dsr_submissions",
+        VISIT_COLUMNS,
+        pageKeys.filter((k) => k.source === "dsr").map((k) => k.id)
+      ),
+      fetchRowsByIds(
+        "agent_meeting_reports",
+        AGENT_MEETING_COLUMNS,
+        pageKeys.filter((k) => k.source === "agent_meeting").map((k) => k.id)
+      ),
+    ])
 
-  const total = dsrCount + meetingCount
-  const offset = (page - 1) * pageSize
-  const data = merged.slice(offset, offset + pageSize)
-  const totalPages = total === 0 ? 0 : Math.ceil(total / pageSize)
+    const submitters = await fetchSubmitters(
+      [...dsrRows, ...meetingRows].map((r) => r.submitted_by as string)
+    )
+    const dsrById = new Map(dsrRows.map((r) => [r.id as string, r]))
+    const meetingById = new Map(meetingRows.map((r) => [r.id as string, r]))
 
-  return {
-    ok: true,
-    data,
-    pagination: {
-      page,
-      page_size: pageSize,
-      total,
-      total_pages: totalPages,
-      has_next: page < totalPages,
-      has_prev: page > 1,
-    },
+    const data: ApiVisit[] = []
+    for (const k of pageKeys) {
+      const row = k.source === "dsr" ? dsrById.get(k.id) : meetingById.get(k.id)
+      if (!row) continue // deleted between phase 1 and phase 2
+      const submitter = submitters.get(row.submitted_by as string)
+      data.push(
+        k.source === "dsr" ? serializeVisit(row, submitter) : serializeAgentMeeting(row, submitter)
+      )
+    }
+
+    const total = dsrCount + meetingCount
+    const totalPages = total === 0 ? 0 : Math.ceil(total / pageSize)
+
+    return {
+      ok: true,
+      data,
+      pagination: {
+        page,
+        page_size: pageSize,
+        total,
+        total_pages: totalPages,
+        has_next: page < totalPages,
+        has_prev: page > 1,
+      },
+    }
+  } catch (err) {
+    if (err instanceof DbReadError) return { ok: false, error: "db_error" }
+    throw err
   }
 }
 

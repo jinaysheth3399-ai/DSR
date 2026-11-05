@@ -21,6 +21,33 @@ type Step = "phone" | "otp"
 
 const RESEND_COOLDOWN_SEC = 30
 
+// Upper bound on a login request from the browser. The server already caps
+// each database call at 15s, so this only fires if the request itself is
+// stuck in transit; without it a stalled request leaves the button spinning
+// forever.
+const REQUEST_TIMEOUT_MS = 30_000
+
+const UNREACHABLE_MSG = "Couldn't reach the server. Check your connection and try again."
+
+// `res` is null when the request never completed (offline, timed out).
+async function postJson(
+  url: string,
+  body: unknown
+): Promise<{ res: Response | null; json: Record<string, unknown> }> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>
+    return { res, json }
+  } catch {
+    return { res: null, json: {} }
+  }
+}
+
 export function LoginForm() {
   const router = useRouter()
   const [step, setStep] = useState<Step>("phone")
@@ -40,14 +67,10 @@ export function LoginForm() {
   }, [cooldown])
 
   async function sendOtp(): Promise<boolean> {
-    const res = await fetch("/api/auth/send-otp", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone: fullPhone }),
-    })
-    const json = (await res.json().catch(() => ({}))) as {
-      ok?: boolean
-      error?: string
+    const { res, json } = await postJson("/api/auth/send-otp", { phone: fullPhone })
+    if (!res) {
+      toast.error(UNREACHABLE_MSG)
+      return false
     }
     if (!res.ok || !json.ok) {
       toast.error("Couldn't send code. Try again in a moment.")
@@ -81,15 +104,10 @@ export function LoginForm() {
     e.preventDefault()
     if (!otpValid) return
     startTransition(async () => {
-      const res = await fetch("/api/auth/verify-otp", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: fullPhone, otp }),
-      })
-      const json = (await res.json().catch(() => ({}))) as {
-        ok?: boolean
-        role?: "field_sales" | "admin"
-        error?: string
+      const { res, json } = await postJson("/api/auth/verify-otp", { phone: fullPhone, otp })
+      if (!res) {
+        toast.error(UNREACHABLE_MSG)
+        return
       }
 
       if (!res.ok || !json.ok) {
@@ -98,7 +116,9 @@ export function LoginForm() {
             ? "Code has expired. Request a new one."
             : json.error === "too_many_attempts"
               ? "Too many attempts. Request a new code."
-              : "Wrong code."
+              : json.error === "unavailable"
+                ? "The server is busy right now. Please try again in a minute."
+                : "Wrong code."
         toast.error(msg)
         if (
           json.error === "expired_or_invalid" ||

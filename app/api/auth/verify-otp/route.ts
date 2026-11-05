@@ -34,7 +34,8 @@ export async function POST(request: NextRequest) {
   })
 
   if (!result.ok) {
-    const status = result.error === "too_many_attempts" ? 429 : 401
+    const status =
+      result.error === "too_many_attempts" ? 429 : result.error === "unavailable" ? 503 : 401
     return NextResponse.json(
       { ok: false, error: result.error },
       { status }

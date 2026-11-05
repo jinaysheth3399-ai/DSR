@@ -27,11 +27,18 @@ export async function requestOtp(
 ): Promise<RequestOtpResult> {
   const sb = getSupabaseAdmin()
 
-  const { data: employee } = await sb
+  const { data: employee, error: lookupErr } = await sb
     .from("employees")
     .select("id, is_active")
     .eq("phone", phone)
     .maybeSingle()
+
+  // A failed lookup must not fall through to the anti-enumeration branch
+  // below, or the user is told a code was sent when nothing was.
+  if (lookupErr) {
+    logger.error("[otp] employee lookup failed", { code: lookupErr.code, msg: lookupErr.message })
+    return { ok: false, error: "send_failed" }
+  }
 
   // Anti-enumeration: behave the same regardless of whether the phone is
   // whitelisted. Caller always sees ok; SMS is only actually sent for
@@ -85,7 +92,7 @@ export type VerifyOtpResult =
   | { ok: true; role: EmployeeRole; sessionToken: string; expiresAt: Date }
   | {
       ok: false
-      error: "expired_or_invalid" | "too_many_attempts" | "invalid"
+      error: "expired_or_invalid" | "too_many_attempts" | "invalid" | "unavailable"
     }
 
 export async function verifyOtp(
@@ -95,7 +102,7 @@ export async function verifyOtp(
 ): Promise<VerifyOtpResult> {
   const sb = getSupabaseAdmin()
 
-  const { data: otpRow } = await sb
+  const { data: otpRow, error: otpErr } = await sb
     .from("otp_requests")
     .select("id, otp_hash, attempt_count, expires_at, consumed_at")
     .eq("phone", phone)
@@ -105,6 +112,12 @@ export async function verifyOtp(
     .limit(1)
     .maybeSingle()
 
+  // Distinguish "database unreachable" from "no valid code", otherwise an
+  // outage tells the user their correct code has expired.
+  if (otpErr) {
+    logger.error("[otp] code lookup failed", { code: otpErr.code, msg: otpErr.message })
+    return { ok: false, error: "unavailable" }
+  }
   if (!otpRow) return { ok: false, error: "expired_or_invalid" }
 
   if (otpRow.attempt_count >= OTP_MAX_ATTEMPTS) {
@@ -128,12 +141,16 @@ export async function verifyOtp(
     .update({ consumed_at: new Date().toISOString() })
     .eq("id", otpRow.id)
 
-  const { data: employee } = await sb
+  const { data: employee, error: empErr } = await sb
     .from("employees")
     .select("id, role, is_active")
     .eq("phone", phone)
     .maybeSingle()
 
+  if (empErr) {
+    logger.error("[otp] employee lookup after verify failed", { code: empErr.code, msg: empErr.message })
+    return { ok: false, error: "unavailable" }
+  }
   if (!employee || !employee.is_active) {
     return { ok: false, error: "invalid" }
   }
