@@ -80,6 +80,12 @@ with a value of `null` rather than being omitted.
 
 `details` is optional and only present for validation errors.
 
+**Response reuse.** List responses carry an `X-Cache` header of `hit` or
+`miss`. A `hit` is a saved copy of an earlier response to the same query,
+served only while no visit, agent meeting or employee has been added, edited or
+deleted since it was built, so its body is always identical to a fresh one.
+You do not need to do anything with this header; it is there for monitoring.
+
 ---
 
 ## 4. Endpoints
@@ -390,6 +396,11 @@ a fixed enum. The values called out as `enum` above are fixed in the data model.
 ## 7. Recipes
 
 ### Full export (page through everything)
+
+Use this for a first load or an occasional backfill. For a sync that runs
+several times a day, use the incremental sync below instead: it returns only
+what changed, so a typical run is a single small request rather than every
+page of the full history.
 
 ```bash
 page=1

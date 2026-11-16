@@ -48,7 +48,15 @@ export async function proxy(request: NextRequest) {
   // This only extends the cookie. sessions.expires_at in the database stays
   // the authority on whether a session is still valid, so a revoked or
   // genuinely expired session is still rejected by the DAL.
-  if (sessionToken) {
+  //
+  // Server Action calls (POSTs carrying the `next-action` header) are skipped.
+  // Next merges cookies set here into the action's cookie store, and a cookie
+  // change during an action makes Next re-render the whole current page and
+  // send it back with the result. With the refresh applied to actions, every
+  // form autosave also re-ran the /dsr/new page and its database reads (7
+  // requests per save instead of 3). Ordinary navigations still refresh the
+  // cookie, which is all the sliding expiry needs.
+  if (sessionToken && !request.headers.has("next-action")) {
     response.cookies.set({
       name: SESSION_COOKIE_NAME,
       value: sessionToken,

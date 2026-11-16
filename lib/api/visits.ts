@@ -1,5 +1,7 @@
 import "server-only"
 
+import { gunzipSync, gzipSync } from "node:zlib"
+
 import { z } from "zod"
 
 import { getSupabaseAdmin } from "@/lib/supabase/admin"
@@ -309,8 +311,26 @@ export type ListVisitsResult =
   | { ok: true; data: ApiVisit[]; pagination: Pagination }
   | { ok: false; error: string }
 
+// Paging runs against the api_visit_keys view (migration 0007), which unions
+// dsr_submissions and agent_meeting_reports with just the columns the API
+// sorts and filters on. Postgres merges the two tables' indexes and skips to
+// the offset itself, so one request returns a page of (id, source) keys in
+// final order plus the exact total, at any depth (about 6 ms for the deepest
+// page). Full rows are then loaded for that page only.
+//
+// Until Nov 2026 the app instead fetched every key up to the requested depth
+// from each table, 1000 at a time, and merged them in JavaScript. A client
+// paging through everything (the API's main consumer does, several times an
+// hour) made each page cost more than the last, so a full sync cost grew with
+// the square of the row count, and a 20,000-rows-per-table ceiling meant an
+// oldest-first sync would have silently stopped receiving new visits.
+//
+// Columns that exist on only one table are null in the other's rows, so the
+// outcome and has_lead filters exclude agent meetings, which have no such
+// concept. agency_a / agency_b are the two text columns `agency` matches on
+// each table (agency code and name; travel agent name and agent code).
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function applyDsrFilters(q: any, query: VisitsQuery): any {
+function applyKeyFilters(q: any, query: VisitsQuery): any {
   let out = q
   if (query.date_from) out = out.gte("visit_date", query.date_from)
   if (query.date_to) out = out.lte("visit_date", query.date_to)
@@ -324,83 +344,54 @@ function applyDsrFilters(q: any, query: VisitsQuery): any {
     // or() grammar (`,` separates conditions, `()` groups them, `%_` are
     // ilike wildcards).
     const a = query.agency.replace(/[%_,()]/g, "")
-    if (a.length > 0) out = out.or(`agency_code.ilike.%${a}%,agency_name.ilike.%${a}%`)
+    if (a.length > 0) out = out.or(`agency_a.ilike.%${a}%,agency_b.ilike.%${a}%`)
   }
   return out
 }
 
-// agent_meeting_reports has no outcome/lead concept, so a row can never match
-// those filters, so callers skip fetching this table when either is set.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function applyMeetingFilters(q: any, query: VisitsQuery): any {
-  let out = q
-  if (query.date_from) out = out.gte("visit_date", query.date_from)
-  if (query.date_to) out = out.lte("visit_date", query.date_to)
-  if (query.submitted_by) out = out.eq("submitted_by", query.submitted_by)
-  if (query.updated_since) out = out.gte("updated_at", query.updated_since)
-  if (query.agency) {
-    const a = query.agency.replace(/[%_,()]/g, "")
-    if (a.length > 0) out = out.or(`travel_agent_name.ilike.%${a}%,agent_code.ilike.%${a}%`)
-  }
-  return out
-}
-
-// Merging two tables into one sorted, paginated list only needs the top
-// `limit` rows from EACH source, sorted the same way at the DB level: a row
-// past position `limit` in its own source's order can never rank inside the
-// merged top-`limit`, since `limit` higher-or-equal rows from that source
-// already precede it.
-//
-// That top-`limit` grows with page depth, so it is gathered in two phases.
-// Phase 1 fetches only (id, sort column) for the top `limit` keys, which the
-// (created_at, id) / (updated_at, id) / visit_date indexes serve as index-only
-// scans. Phase 2 loads full rows for the one page actually being returned.
-// Previously phase 1 fetched every full row up to the requested depth and
-// threw most of them away: a client paging through everything made Postgres
-// read and ship the whole table again for every page, which was ~80% of all
-// database work and is what saturated the database.
-const FETCH_BATCH_SIZE = 1000 // PostgREST max-rows on this project
-const LIMIT_CAP = 20_000 // defensive ceiling on how deep a single request may page
+const KEYS_VIEW = "api_visit_keys"
 const ID_CHUNK = 100 // keep `id=in.(...)` URLs well under gateway length limits
 
 // A database read failed (including the client-side timeout). Surfaced as a
 // retryable 500 rather than silently serving a short or wrong page.
 class DbReadError extends Error {}
 
-type SortKey = { id: string; sort: string; source: "dsr" | "agent_meeting" }
+type PageKey = { id: string; source: "dsr" | "agent_meeting" }
 
-async function fetchTopKeys(
-  table: string,
-  source: SortKey["source"],
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  applyFilters: (q: any, query: VisitsQuery) => any,
+async function fetchPageKeys(
   query: VisitsQuery,
+  offset: number,
   limit: number
-): Promise<SortKey[]> {
+): Promise<{ keys: PageKey[]; total: number }> {
   const sb = getSupabaseAdmin()
-  const keys: SortKey[] = []
-  let offset = 0
-  while (keys.length < limit) {
-    const batchSize = Math.min(FETCH_BATCH_SIZE, limit - offset)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let q: any = sb.from(table).select(`id, ${query.sort}`)
-    q = applyFilters(q, query)
-      .order(query.sort, { ascending: query.order === "asc" })
-      .order("id", { ascending: true }) // stable tiebreaker
-      .range(offset, offset + batchSize - 1)
-    const { data, error } = await q
-    if (error) {
-      logger.error(`[api] fetchTopKeys(${table}) failed`, { code: error.code, msg: error.message })
-      throw new DbReadError(table)
-    }
-    const batch = (data ?? []) as Array<Record<string, unknown>>
-    for (const r of batch) {
-      keys.push({ id: r.id as string, sort: r[query.sort] as string, source })
-    }
-    if (batch.length < batchSize) break // exhausted this source
-    offset += batchSize
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let q: any = sb.from(KEYS_VIEW).select("id, source", { count: "exact" })
+  q = applyKeyFilters(q, query)
+    .order(query.sort, { ascending: query.order === "asc" })
+    .order("id", { ascending: true }) // stable tiebreaker
+    .range(offset, offset + limit - 1)
+  const { data, error, count } = await q
+  if (error) {
+    // PostgREST answers 416 / PGRST103 when the offset is past the last row
+    // and an exact count was asked for. That is an empty page, not a failure.
+    if (error.code === "PGRST103") return { keys: [], total: await countKeys(query) }
+    logger.error("[api] fetchPageKeys failed", { code: error.code, msg: error.message })
+    throw new DbReadError(KEYS_VIEW)
   }
-  return keys
+  return { keys: (data ?? []) as PageKey[], total: count ?? 0 }
+}
+
+async function countKeys(query: VisitsQuery): Promise<number> {
+  const sb = getSupabaseAdmin()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let q: any = sb.from(KEYS_VIEW).select("id", { count: "exact", head: true })
+  q = applyKeyFilters(q, query)
+  const { count, error } = await q
+  if (error) {
+    logger.error("[api] countKeys failed", { code: error.code, msg: error.message })
+    throw new DbReadError(KEYS_VIEW)
+  }
+  return count ?? 0
 }
 
 async function fetchRowsByIds(
@@ -427,50 +418,12 @@ async function fetchRowsByIds(
   return rows
 }
 
-async function countRows(
-  table: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  applyFilters: (q: any, query: VisitsQuery) => any,
-  query: VisitsQuery
-): Promise<number> {
-  const sb = getSupabaseAdmin()
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let q: any = sb.from(table).select("id", { count: "exact", head: true })
-  q = applyFilters(q, query)
-  const { count, error } = await q
-  if (error) {
-    logger.error(`[api] countRows(${table}) failed`, { code: error.code, msg: error.message })
-    throw new DbReadError(table)
-  }
-  return count ?? 0
-}
-
 export async function listVisits(query: VisitsQuery): Promise<ListVisitsResult> {
   const { page, page_size: pageSize } = query
-  const limit = Math.min(page * pageSize, LIMIT_CAP)
-  const includeMeetings = !query.outcome && !query.has_lead
 
   try {
-    // Phase 1: narrow sort keys only, plus totals.
-    const [dsrKeys, meetingKeys, dsrCount, meetingCount] = await Promise.all([
-      fetchTopKeys("dsr_submissions", "dsr", applyDsrFilters, query, limit),
-      includeMeetings
-        ? fetchTopKeys("agent_meeting_reports", "agent_meeting", applyMeetingFilters, query, limit)
-        : Promise.resolve([] as SortKey[]),
-      countRows("dsr_submissions", applyDsrFilters, query),
-      includeMeetings ? countRows("agent_meeting_reports", applyMeetingFilters, query) : Promise.resolve(0),
-    ])
+    const { keys: pageKeys, total } = await fetchPageKeys(query, (page - 1) * pageSize, pageSize)
 
-    const dir = query.order === "asc" ? 1 : -1
-    const merged = [...dsrKeys, ...meetingKeys].sort((a, b) => {
-      if (a.sort === b.sort) return a.id < b.id ? -1 : 1 // stable tiebreaker
-      return a.sort < b.sort ? -dir : dir
-    })
-
-    const offset = (page - 1) * pageSize
-    const pageKeys = merged.slice(offset, offset + pageSize)
-
-    // Phase 2: full rows for this page only.
     const [dsrRows, meetingRows] = await Promise.all([
       fetchRowsByIds(
         "dsr_submissions",
@@ -493,14 +446,13 @@ export async function listVisits(query: VisitsQuery): Promise<ListVisitsResult> 
     const data: ApiVisit[] = []
     for (const k of pageKeys) {
       const row = k.source === "dsr" ? dsrById.get(k.id) : meetingById.get(k.id)
-      if (!row) continue // deleted between phase 1 and phase 2
+      if (!row) continue // deleted between the key and row reads
       const submitter = submitters.get(row.submitted_by as string)
       data.push(
         k.source === "dsr" ? serializeVisit(row, submitter) : serializeAgentMeeting(row, submitter)
       )
     }
 
-    const total = dsrCount + meetingCount
     const totalPages = total === 0 ? 0 : Math.ceil(total / pageSize)
 
     return {
@@ -519,6 +471,84 @@ export async function listVisits(query: VisitsQuery): Promise<ListVisitsResult> 
     if (err instanceof DbReadError) return { ok: false, error: "db_error" }
     throw err
   }
+}
+
+// ---------------------------------------------------------------------------
+// Response reuse.
+//
+// The main consumer re-downloads every page several times an hour, mostly
+// while nothing has changed (overnight especially). Each finished response
+// body is kept, gzipped, in this server instance's memory, keyed by the exact
+// query, and reused while api_visits_version() (migration 0007) returns the
+// same value. That function fingerprints every row a response is built from
+// (visits, meetings, employee names); any insert, edit or delete changes it
+// and drops every saved response, so a reused body is identical to what a
+// fresh build would return. A reuse costs one small query instead of the
+// key, row and employee reads.
+//
+// Per-instance memory rather than Next's shared data cache: it has no
+// platform usage limits, and correctness does not depend on how often it
+// hits. Entries are small (a 500-visit page is ~700 KB of JSON, ~60 KB
+// gzipped) and capped.
+// ---------------------------------------------------------------------------
+
+const RESPONSE_CACHE_MAX_ENTRIES = 300
+let responseCacheVersion = ""
+const responseCache = new Map<string, Buffer>()
+
+async function fetchDataVersion(): Promise<string | null> {
+  const { data, error } = await getSupabaseAdmin().rpc("api_visits_version")
+  if (error || typeof data !== "string") {
+    logger.error("[api] api_visits_version failed", { code: error?.code, msg: error?.message })
+    return null
+  }
+  return data
+}
+
+// Same filters, sort and page in any parameter order map to the same entry.
+function responseCacheKey(query: VisitsQuery): string {
+  return JSON.stringify(
+    Object.entries(query)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+  )
+}
+
+export type ListVisitsJsonResult =
+  | { ok: true; body: string; cache: "hit" | "miss" }
+  | { ok: false; error: string }
+
+// The list endpoint's response body ({ data, pagination } as JSON), reused
+// when the data has not changed since it was built.
+export async function listVisitsJson(query: VisitsQuery): Promise<ListVisitsJsonResult> {
+  // If the fingerprint cannot be read, serve a fresh build and save nothing.
+  const version = await fetchDataVersion()
+  const key = responseCacheKey(query)
+
+  if (version !== null) {
+    if (version !== responseCacheVersion) {
+      responseCache.clear()
+      responseCacheVersion = version
+    }
+    const saved = responseCache.get(key)
+    if (saved) return { ok: true, body: gunzipSync(saved).toString("utf8"), cache: "hit" }
+  }
+
+  const result = await listVisits(query)
+  if (!result.ok) return result
+  const body = JSON.stringify({ data: result.data, pagination: result.pagination })
+
+  // Saved under the fingerprint read before the build. If the data changed
+  // meanwhile, the next call reads a new fingerprint, discards this entry and
+  // rebuilds, so a saved body is never served after a change.
+  if (version !== null && version === responseCacheVersion) {
+    if (responseCache.size >= RESPONSE_CACHE_MAX_ENTRIES) {
+      const oldest = responseCache.keys().next().value
+      if (oldest !== undefined) responseCache.delete(oldest)
+    }
+    responseCache.set(key, gzipSync(body))
+  }
+  return { ok: true, body, cache: "miss" }
 }
 
 // ---------------------------------------------------------------------------

@@ -10,13 +10,14 @@ let _client: SupabaseClient | null = null
 // retrying, which piles more work onto a database that is already stuck. A
 // timed-out request surfaces as an ordinary `error` on the supabase-js result,
 // which every caller already handles.
+//
+// This must be supabase-js's own `db.timeout`, not a timeout signal added in a
+// custom fetch. postgrest-js retries GET/HEAD up to 3 more times on network
+// errors, and AbortSignal.timeout() fails with a TimeoutError, which counts as
+// one; only an AbortError is treated as deliberate. With the custom-fetch
+// version a stuck read took ~67s (4 x 15s plus backoff) and hit the struggling
+// database 4 times. db.timeout aborts with an AbortError, so it is final.
 const REQUEST_TIMEOUT_MS = 15_000
-
-const fetchWithTimeout: typeof fetch = (input, init) => {
-  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-  const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
-  return fetch(input, { ...init, signal })
-}
 
 export function getSupabaseAdmin(): SupabaseClient {
   if (_client) return _client
@@ -32,8 +33,7 @@ export function getSupabaseAdmin(): SupabaseClient {
 
   _client = createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
-    db: { schema: "public" },
-    global: { fetch: fetchWithTimeout },
+    db: { schema: "public", timeout: REQUEST_TIMEOUT_MS },
   })
 
   return _client

@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server"
 
 import { authenticateApiRequest } from "@/lib/auth/api-key"
 import { apiError } from "@/lib/api/response"
-import { listVisits, visitsQuerySchema } from "@/lib/api/visits"
+import { listVisitsJson, visitsQuerySchema } from "@/lib/api/visits"
 import { logger } from "@/lib/logger"
 
 // Data endpoint: always evaluated per-request, never statically cached.
@@ -27,13 +27,16 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const result = await listVisits(parsed.data)
+    const result = await listVisitsJson(parsed.data)
     if (!result.ok) {
       return apiError(500, "internal_error", "Could not load visits. Please retry.")
     }
-    return NextResponse.json({
-      data: result.data,
-      pagination: result.pagination,
+    // The body is the same JSON NextResponse.json() would produce; it may be
+    // a saved copy, reused only while the underlying data is unchanged (see
+    // listVisitsJson). X-Cache says which, for monitoring.
+    return new NextResponse(result.body, {
+      status: 200,
+      headers: { "content-type": "application/json", "x-cache": result.cache },
     })
   } catch (err) {
     logger.error("[api] GET /visits crashed", {

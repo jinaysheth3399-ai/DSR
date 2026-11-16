@@ -77,7 +77,11 @@ export function DsrForm({ optionsByField, initialDraft }: Props) {
 
   const submittingRef = useRef(false)
 
-  // Auto-save (debounced) — gated until user resolved the draft banner.
+  // Auto-save (debounced), gated until the user resolves the draft banner.
+  // Saves after 2s without changes: often enough that a closed tab loses at
+  // most a moment of typing, rarely enough that a rep's pauses between words
+  // don't each cost a server round trip (at 0.8s a single visit averaged ~23
+  // saves). Step changes still save immediately (below).
   useEffect(() => {
     if (!draftDecided) return
     let timer: ReturnType<typeof setTimeout> | null = null
@@ -87,7 +91,7 @@ export function DsrForm({ optionsByField, initialDraft }: Props) {
         if (submittingRef.current) return
         const r = await saveDraft(data, stepRef.current)
         if (r.ok) setSavedAt(r.updatedAt)
-      }, 800)
+      }, 2000)
     })
     return () => {
       sub.unsubscribe()

@@ -23,6 +23,21 @@ export type CurrentUser = {
   session_id: string
 }
 
+type SessionWithEmployee = {
+  id: string
+  employee_id: string
+  expires_at: string
+  last_seen_at: string
+  employee: {
+    id: string
+    full_name: string
+    phone: string
+    employee_code: string
+    role: string
+    is_active: boolean
+  } | null
+}
+
 export const getCurrentUser = cache(async (): Promise<CurrentUser | null> => {
   const cookieStore = await cookies()
   const token = cookieStore.get(SESSION_COOKIE_NAME)?.value
@@ -31,22 +46,23 @@ export const getCurrentUser = cache(async (): Promise<CurrentUser | null> => {
   const tokenHash = hashSessionToken(token)
   const sb = getSupabaseAdmin()
 
-  const { data: session, error: sessionErr } = await sb
+  // Session and its employee in one request (embedded through the
+  // sessions.employee_id foreign key). This runs on every page render and
+  // Server Action, so it was the app's most frequent pair of queries.
+  const { data, error: sessionErr } = await sb
     .from("sessions")
-    .select("id, employee_id, expires_at, last_seen_at")
+    .select(
+      "id, employee_id, expires_at, last_seen_at, employee:employees(id, full_name, phone, employee_code, role, is_active)"
+    )
     .eq("token_hash", tokenHash)
     .maybeSingle()
 
-  if (sessionErr || !session) return null
+  if (sessionErr || !data) return null
+  const session = data as unknown as SessionWithEmployee
   if (new Date(session.expires_at).getTime() <= Date.now()) return null
 
-  const { data: employee, error: empErr } = await sb
-    .from("employees")
-    .select("id, full_name, phone, employee_code, role, is_active")
-    .eq("id", session.employee_id)
-    .maybeSingle()
-
-  if (empErr || !employee || !employee.is_active) return null
+  const employee = session.employee
+  if (!employee || !employee.is_active) return null
 
   const lastSeenMs = new Date(session.last_seen_at).getTime()
   if (Date.now() - lastSeenMs > SLIDING_REFRESH_THRESHOLD_SEC * 1000) {
